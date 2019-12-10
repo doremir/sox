@@ -22,6 +22,14 @@ Download and install from http://www.mingw.org.
 ## 3. Build libsox
 1. Open a `MinGW Shell` and standing in this folder run
 ```
+autoreconf --install
+```
+Comment the line in configure that starts with `PKG_CHECK_MODULES`, like this
+```
+#PKG_CHECK_MODULES(OPUS, opusfile, , using_opus=no)
+```
+and then run
+```
 ./configure --without-magic --without-png --without-ladspa --without-opus --without-mad --without-libltdl --without-coreaudio --without-gsm --without-lpc10 --with-mpg123 --disable-static --enable-shared && make
 ```
 2. The result can be found in `src/.libs/libsox-3.dll`.
