@@ -2048,6 +2048,13 @@ sox_find_effect(
 /**
 Client API:
 Creates an effect using the given handler.
+The returned handle must be closed with sox_delete_effect().
+This can be done as soon as the effect is added to an effects chain.
+NOTE: in the official libsox fork, sox_delete_effect() is broken and
+      cannot be used by client code. There, free() should be called
+      instead on the returned effect (which will leak memory if the
+      effect is not successfully added to an effects chain).
+      Use sox_add_and_delete_effect() if it exists to avoid this issue.
 @returns The new effect, or null if not found.
 */
 LSX_RETURN_OPT
@@ -2119,6 +2126,21 @@ LSX_API
 sox_add_effect(
     LSX_PARAM_INOUT sox_effects_chain_t * chain, /**< Effects chain to which effect should be added . */
     LSX_PARAM_INOUT sox_effect_t * effp, /**< Effect to be added. */
+    LSX_PARAM_INOUT sox_signalinfo_t * in, /**< Input format. */
+    LSX_PARAM_IN    sox_signalinfo_t const * out /**< Output format. */
+    );
+
+/**
+Client API:
+Adds an effect to the effects chain, returns SOX_SUCCESS if successful.
+The effect is also automatically freed correctly, regardless of the result.
+@returns SOX_SUCCESS if successful.
+*/
+int
+LSX_API
+sox_add_and_delete_effect (
+    LSX_PARAM_INOUT sox_effects_chain_t * chain, /**< Effects chain to which effect should be added . */
+    LSX_PARAM_INOUT sox_effect_t * eh, /**< Effect to be added. */
     LSX_PARAM_INOUT sox_signalinfo_t * in, /**< Input format. */
     LSX_PARAM_IN    sox_signalinfo_t const * out /**< Output format. */
     );

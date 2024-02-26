@@ -118,6 +118,27 @@ int lsx_effect_set_imin(sox_effect_t * effp, size_t imin)
   return SOX_SUCCESS;
 }
 
+/* Convenience function to avoid having to explicitly free the effect object
+   (which is not useable after adding it to an effects chain anyway).
+   This exists because if libsox is dynamically linked on Windows, effects
+   returned by sox_create_effect() cannot be freed using free() by the
+   application since they were allocated in the libsox DLL. sox_delete_effect()
+   cannot be used in the official libsox distribution because it will lead to a
+   double free. While that is fixed in this fork, the calling code has no way
+   of knowing that. This is the rationale for this function: the calling
+   application can check if sox_add_and_delete_effect() exists and use it in
+   that case, otherwise it can resort to not freeing the sox_effect_t object
+   and just letting it leak.
+ */
+int sox_add_and_delete_effect(sox_effects_chain_t * chain, sox_effect_t * effp, sox_signalinfo_t * in, sox_signalinfo_t const * out)
+{
+  int result;
+  result = sox_add_effect(chain, effp, in, out);
+  sox_delete_effect(effp);
+  return result;
+}
+
+
 /* Effects table to be extended in steps of EFF_TABLE_STEP */
 #define EFF_TABLE_STEP 8
 
@@ -132,6 +153,8 @@ int sox_add_effect(sox_effects_chain_t * chain, sox_effect_t * effp, sox_signali
   int ret, (*start)(sox_effect_t * effp) = effp->handler.start;
   size_t f;
   sox_effect_t eff0;  /* Copy of effect for flow 0 before calling start */
+
+  assert(effp->priv); /* Effect instances cannot be reused */
 
   effp->global_info = &chain->global_info;
   effp->in_signal = *in;
@@ -199,14 +222,16 @@ int sox_add_effect(sox_effects_chain_t * chain, sox_effect_t * effp, sox_signali
     chain->effects[chain->length][f] = eff0;
     chain->effects[chain->length][f].flow = f;
     chain->effects[chain->length][f].priv = lsx_memdup(eff0.priv, eff0.handler.priv_size);
-    if (start(&chain->effects[chain->length][f]) != SOX_SUCCESS) {
+  }
       free(eff0.priv);
+  effp->priv = NULL;  /* At this point, effp->priv is "owned" by the chain */
+
+  for (f = 1; f < effp->flows; ++f) {
+    if (start(&chain->effects[chain->length][f]) != SOX_SUCCESS)
       return SOX_EOF;
     }
-  }
 
   ++chain->length;
-  free(eff0.priv);
   return SOX_SUCCESS;
 }
 
@@ -541,6 +566,13 @@ void sox_delete_effect(sox_effect_t *effp)
   uint64_t clips;
   size_t f;
 
+  /* If priv is NULL, it means that ownership has been transfered to
+     the effect chain and we should only free the actual effect struct. */
+  if (!effp->priv) {
+    free(effp);
+    return;
+  }
+
   if ((clips = sox_stop_effect(effp)) != 0)
     lsx_warn("%s clipped %" PRIu64 " samples; decrease volume?",
         effp->handler.name, clips);
@@ -550,7 +582,11 @@ void sox_delete_effect(sox_effect_t *effp)
       /* May or may not indicate a problem; it is normal if the user aborted
          processing, or if an effect like "trim" stopped early. */
   effp->handler.kill(effp); /* N.B. only one kill; not one per flow */
-  for (f = 0; f < effp->flows; ++f)
+  
+  /* There is always at least one element */
+  free(effp->priv);
+  /* More may have been allocated by sox_add_effect */ 
+  for (f = 1; f < effp->flows; ++f)
     free(effp[f].priv);
   free(effp->obuf);
   free(effp);
