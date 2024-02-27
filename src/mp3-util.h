@@ -378,8 +378,6 @@ static size_t mp3_duration(sox_format_t * ft)
 
   lsx_rewind(ft);
 
-  // fprintf(stderr, "File length in samples, according to mpg123 (after scan): %zu / %zu\n", samples, samples * channels);
-
   return (size_t) (samples * channels);
 }
 

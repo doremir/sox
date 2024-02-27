@@ -1,6 +1,6 @@
 /* MP3 support for SoX
  *
- * Uses libmad for MP3 decoding
+ * Uses libmad or libmpg123 for MP3 decoding
  * libmp3lame for MP3 encoding
  * and libtwolame for MP2 encoding
  *
@@ -326,7 +326,7 @@ typedef struct mp3_priv_t {
 #endif
 } priv_t;
 
-#if defined(HAVE_MAD_H) || defined(HAVE_MPG123_H)
+#if defined(HAVE_MAD_H)
 
 /* This function merges the functions tagtype() and id3_tag_query()
    from MAD's libid3tag, so we don't have to link to it
@@ -357,7 +357,7 @@ static int tagtype(const unsigned char *data, size_t length)
     return 0;
 }
 
-#endif /*HAVE_MAD_H || HAVE_MPG123_H */
+#endif /*HAVE_MAD_H */
 
 #include "mp3-util.h"
 
@@ -825,7 +825,7 @@ static int startread(sox_format_t * ft)
     lsx_fail_errno(ft, SOX_EOF, "Could not get mpg123 handle: %s", mpg123_plain_strerror(error));
     return SOX_EOF;
   }
-  error = mpg123_param(p->handle, MPG123_FLAGS, MPG123_FUZZY | MPG123_SEEKBUFFER | MPG123_GAPLESS | MPG123_FORCE_FLOAT, 0);
+  error = mpg123_param(p->handle, MPG123_FLAGS, MPG123_FUZZY | MPG123_SEEKBUFFER | MPG123_GAPLESS | MPG123_FORCE_FLOAT, 0.);
   if (error) {
     lsx_fail_errno(ft, SOX_EOF, "Unable to set library options: %s", mpg123_plain_strerror(error));
     return SOX_EOF;
@@ -961,7 +961,7 @@ static int stopread(sox_format_t * ft)
   return SOX_SUCCESS;
 }
 
-static int sox_mp3seek(sox_format_t * ft, uint64_t offset)
+static int sox_mp3seek(sox_format_t * ft UNUSED, uint64_t offset UNUSED)
 {
   lsx_fail("Seeking in mp3 is not yet implemented");
   return SOX_EOF;
