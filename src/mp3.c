@@ -277,8 +277,10 @@ static const char* const twolame_library_names[] =
 
 /* Private data */
 typedef struct mp3_priv_t {
+#if defined(HAVE_MAD_H) || defined(HAVE_LAME) || defined(HAVE_TWOLAME)
   unsigned char *mp3_buffer;
   size_t mp3_buffer_size;
+#endif
 
 #ifdef HAVE_MAD_H
   struct mad_stream       Stream;
@@ -747,31 +749,6 @@ static int sox_mp3seek(sox_format_t * ft, sox_uint64_t offset)
 
 #ifdef HAVE_MPG123_H
 
-/*
- * Feed mpg123 handler with new data from the input stream. This
- * is much more simple than with MAD, since mpg123 uses internal
- * buffering.
- */
-static int sox_mpg123_input(sox_format_t * ft)
-{
-    priv_t *p = (priv_t *) ft->priv;
-    size_t bytes_read;
-    int error;
-
-    bytes_read = lsx_readbuf(ft, p->mp3_buffer, p->mp3_buffer_size);
-    if (bytes_read == 0) {
-      return SOX_EOF;
-    }
-
-    error = p->mpg123_feed(p->handle, p->mp3_buffer, bytes_read);
-    if (error) {
-      lsx_fail_errno(ft, SOX_EOF, "mpg123 error: %s", mpg123_plain_strerror(error));
-      return SOX_EOF;
-    }
-
-    return SOX_SUCCESS;
-}
-
 /* MPG123 startread */
 static int startread(sox_format_t * ft)
 {
@@ -780,6 +757,7 @@ static int startread(sox_format_t * ft)
   int ret;
   sox_bool ignore_length = ft->signal.length == SOX_IGNORE_LENGTH;
   int open_library_result;
+  unsigned char readbuf[16384];
 
   LSX_DLLIBRARY_OPEN(
       p,
@@ -808,20 +786,18 @@ static int startread(sox_format_t * ft)
   }
 
   /* Allocate buffers */
-  p->mp3_buffer_size = sox_globals.bufsiz;
-  p->mp3_buffer = lsx_malloc(p->mp3_buffer_size);
-  p->raw_buffer_size = p->mp3_buffer_size * 16; /* TODO: better calculation */
+  p->raw_buffer_size = 65536;
   p->raw_buffer = lsx_malloc(p->raw_buffer_size);
 
   /* Get a mpg123 handle */
   p->handle = p->mpg123_new(NULL, &error);
   if (!p->handle) {
-    lsx_fail_errno(ft, SOX_EOF, "Could not get mpg123 handle: %s", mpg123_plain_strerror(error));
+    lsx_fail_errno(ft, SOX_EOF, "Could not get mpg123 handle: %s", p->mpg123_plain_strerror(error));
     return SOX_EOF;
   }
-  error = mpg123_param(p->handle, MPG123_FLAGS, MPG123_FUZZY | MPG123_SEEKBUFFER | MPG123_GAPLESS | MPG123_FORCE_FLOAT, 0.);
+  error = p->mpg123_param(p->handle, MPG123_FLAGS, MPG123_FUZZY | MPG123_SEEKBUFFER | MPG123_GAPLESS | MPG123_FORCE_FLOAT, 0.);
   if (error) {
-    lsx_fail_errno(ft, SOX_EOF, "Unable to set library options: %s", mpg123_plain_strerror(error));
+    lsx_fail_errno(ft, SOX_EOF, "Unable to set library options: %s", p->mpg123_plain_strerror(error));
     return SOX_EOF;
   }
 
@@ -841,42 +817,75 @@ static int startread(sox_format_t * ft)
   /* Open mpg123 handle in feed mode */
   error = p->mpg123_open_feed(p->handle);
   if (error) {
-    lsx_fail_errno(ft, SOX_EOF, "Unable open feed: %s", mpg123_plain_strerror(error));
+    lsx_fail_errno(ft, SOX_EOF, "Unable open feed: %s", p->mpg123_plain_strerror(error));
     return SOX_EOF;
   }
 
   /* Decode until the format is found */
-  ret = sox_mpg123_input(ft);
-  if (ret == SOX_EOF) return SOX_EOF;
+  ret = MPG123_NEED_MORE;
+  while (ret == MPG123_NEED_MORE) {
 
-  ret = MPG123_OK;
-  while(ret != MPG123_ERR && ret != MPG123_NEED_MORE) {
-    size_t bytes;
-    ret = p->mpg123_read(p->handle, p->raw_buffer + p->raw_buffer_end, p->raw_buffer_size - p->raw_buffer_end, &bytes);
-    p->raw_buffer_end += bytes;
-    /* If we found a format, set signal info and stop processing */
-    if (ret == MPG123_NEW_FORMAT) {
+    size_t bytes_read = lsx_readbuf(ft, readbuf, sizeof(readbuf));
+    size_t bytes_decoded;
+    if (bytes_read == 0) {
+     lsx_fail_errno(ft, SOX_EOF, "End of mp3 data before format was found");
+      return SOX_EOF;
+    }
+
+    /* Call mpg123_decode with no output buffer, this makes mpg123 read until
+       decoded data is available and stop there. Note that mpg123 buffers internally
+       so it is no problem if we "over-read". */
+    ret = p->mpg123_decode(p->handle, readbuf, bytes_read, NULL, 0, &bytes_decoded);
+
+    /* If we find a mp3 format, read it and return success.
+       Otherwise, continue loop and feed more data into the parser. */
+    if (ret == MPG123_NEW_FORMAT)
+    {
+      long rate = 0;
       int channels = 0;
       int enc = 0;
-      long rate = 0;
       p->mpg123_getformat(p->handle, &rate, &channels, &enc);
       ft->signal.rate = rate;
       ft->signal.channels = (unsigned int)channels;
       ft->signal.precision = 16;
-      if (bytes > 0) {
+      if (bytes_decoded > 0) {
         lsx_warn("new format frame returned audio data!");
       }
-      break;
-    }
-    /* This should probably never happen */
-    if (p->raw_buffer_end > p->raw_buffer_size) {
-      p->raw_buffer_end = p->raw_buffer_size; // Avoid crash
-      lsx_fail("Not enough room in raw_buffer!");
-      return SOX_EOF;
+      return SOX_SUCCESS;
     }
   }
 
-  return SOX_SUCCESS;
+  /* If we reach here, something went wrong: there was no mp3 format, but
+     the parser didn't return MPG123_NEED_MORE */
+  lsx_fail_errno(ft, SOX_EOF, "Did not find mp3 format: %s", p->mpg123_plain_strerror(ret));
+  return SOX_EOF;
+}
+
+/* Helper: read already decoded audio data from the mpg123 internal buffer
+   into raw_buffer (without feeding the decoder any more mp3 data) */
+static int read_decoded_data(sox_format_t * ft)
+{
+  priv_t *p = (priv_t *) ft->priv;
+  while(1) {
+    size_t bytes_decoded;
+    int ret = p->mpg123_decode(p->handle, NULL, 0, p->raw_buffer + p->raw_buffer_end, p->raw_buffer_size - p->raw_buffer_end, &bytes_decoded);
+    p->raw_buffer_end += bytes_decoded;
+  
+    /* Check for new format. We don't actually handle format changes, just warn
+       if the new format doesn't match the old format. */
+    if (ret == MPG123_NEW_FORMAT) {
+      long rate;
+      int channels, enc;
+      p->mpg123_getformat(p->handle, &rate, &channels, &enc);
+      if (rate != ft->signal.rate || channels != (int)ft->signal.channels) {
+        fprintf(stderr, "** New (mismatching) mp3 format: %li Hz, %i channels\n", rate, channels);
+        lsx_warn("New (mismatching) mp3 format: %li Hz, %i channels", rate, channels);
+      }
+      continue;
+    }
+  
+    return ret;
+  }
 }
 
 /*
@@ -889,13 +898,14 @@ static size_t sox_mp3read(sox_format_t * ft, sox_sample_t *buf, size_t len)
 {
     priv_t *p = (priv_t *) ft->priv;
     size_t donow, i, done=0;
+    sox_bool input_eof = 0;
 
     do {
-        /* copy from raw_buffer to return buffer */
+        /* start by copying data already in raw_buffer to return buffer */
         size_t samples = (p->raw_buffer_end - p->raw_buffer_start) / sizeof(float);
         donow=min(len, samples);
         if (donow > 0) {
-          float *ibuf = (float*)(p->raw_buffer + p->raw_buffer_start); // Cast
+          float *ibuf = (float*)(p->raw_buffer + p->raw_buffer_start); /* Cast */
           i=0;
           SOX_SAMPLE_LOCALS;
           while(i<donow){
@@ -909,34 +919,48 @@ static size_t sox_mp3read(sox_format_t * ft, sox_sample_t *buf, size_t len)
         }
 
         /* return if no more data is needed right now */
-        if (len == 0) break;
+        if (len == 0) {
+          break;
+        }
 
         /* if we reach this point, it is because raw_buffer is empty */
         p->raw_buffer_start = 0;
         p->raw_buffer_end = 0;
 
-        /* feed mp3 decoder */
-        /* TODO: check if it is really needed at this point */
-        sox_mpg123_input(ft);
-
-        /* decode data and place in raw_buffer */
-        int ret = MPG123_OK;
-        while((ret != MPG123_ERR) && (ret != MPG123_NEED_MORE)
-              && ((p->raw_buffer_size - p->raw_buffer_end) > p->mpg123_outblock(p->handle))) {
-          size_t bytes;
-          ret = p->mpg123_read(p->handle, p->raw_buffer + p->raw_buffer_end, p->raw_buffer_size - p->raw_buffer_end, &bytes);
-          if (ret == MPG123_NEW_FORMAT) {
-            long rate;
-            int channels, enc;
-            p->mpg123_getformat(p->handle, &rate, &channels, &enc);
-            if (rate != ft->signal.rate || channels != (int)ft->signal.channels) {
-              lsx_warn("New mp3 format: %li Hz, %i channels", rate, channels);
-            }
-          }
-          p->raw_buffer_end += bytes;
+        /* ... and if there is no more input, there is no point in continuing */
+        if (input_eof) {
+          return done;
         }
-        /* If buffer is still empty, there is nothing more to process */
-        if (p->raw_buffer_end == 0) break;
+
+        /* fill raw_buffer with already decoded data (from mpg123's internal buffer) */
+        int ret = read_decoded_data(ft);
+
+        /* if that wasn't enough to fill raw_buffer, read from input and feed the decoder */
+        if (p->raw_buffer_end < p->raw_buffer_size && ret == MPG123_NEED_MORE) {
+          unsigned char readbuf[16384];
+          size_t bytes_read;
+          int ret = MPG123_NEED_MORE;
+          bytes_read = lsx_readbuf(ft, readbuf, sizeof(readbuf));
+          if (bytes_read > 0) {
+            ret = p->mpg123_feed(p->handle, readbuf, bytes_read);
+            if (ret != MPG123_OK) {
+              lsx_fail_errno(ft, SOX_EOF, "mpg123 feed failed");
+            }
+          } else {
+            /* could not read from input. But don't exit just yet, let the loop run once
+               more so that we can drain any already decoded samples. Just set a flag. */
+            input_eof = 1;
+          }
+
+          /* ... and fill raw_buffer with that data */
+          read_decoded_data(ft);
+        }
+
+        /* if buffer is still empty, there is nothing more to process */
+        if (p->raw_buffer_end == 0) {
+          break;
+        }
+
     } while(1);
 
     return done;
@@ -948,7 +972,6 @@ static int stopread(sox_format_t * ft)
 
   p->mpg123_close(p->handle);
 
-  free(p->mp3_buffer);
   free(p->raw_buffer);
   p->mpg123_exit();
   LSX_DLLIBRARY_CLOSE(p, mpg123_dl);
